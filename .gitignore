@@ -1,0 +1,4 @@
+*.csv
+*.iml
+*.cfg
+python3/venv
