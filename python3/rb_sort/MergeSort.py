@@ -14,7 +14,6 @@ class MergeSort:
     # sort arr including [start_index, end_index]
     @staticmethod
     def merge_sort(arr: [int], start_index: int, end_index: int):
-        print("start: %d, end: %d" % (start_index, end_index))
         if end_index == start_index:
             return
         mid = int((start_index + end_index)/2)

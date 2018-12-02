@@ -2,4 +2,7 @@
 *.iml
 *.cfg
 python3/venv
-*/.idea/*
+python3/.idea
+*/__pycache__/*
+python3/rb_sort/__pycache__/ComplexSort.cpython-36.pyc
+*.pyc
