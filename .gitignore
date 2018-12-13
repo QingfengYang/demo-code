@@ -6,3 +6,7 @@ python3/.idea
 */__pycache__/*
 python3/rb_sort/__pycache__/ComplexSort.cpython-36.pyc
 *.pyc
+*.class
+scala/run-local/.idea/*
+scala/run-local/target/*
+scala/run-local/*.log
