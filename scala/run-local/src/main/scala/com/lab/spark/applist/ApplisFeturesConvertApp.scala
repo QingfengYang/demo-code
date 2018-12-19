@@ -1,25 +1,26 @@
 package com.lab.spark.applist
 
-import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
-import org.apache.spark.storage.StorageLevel
+import java.sql.Struct
 
-import scala.collection.mutable.ArrayBuffer
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.{Column, DataFrame, SparkSession}
+import org.apache.spark.storage.StorageLevel
 
 object ApplisFeturesConvertApp {
 
-  val DM_APP_CATEGORY_TAGS: String = "dm_app_category_tags"
-  // todo
-  val dm_swa_app_tag: String = "dm_swa_app_tag"
+  val DM_CATEGORY_TBL: String = "dm_app_category"
+  val DM_SUB_CATEGORY_TBL: String = "dm_app_sub_category"
+  val DM_TAG_TBL: String = "dm_app_tag"
 
-  val dm_category_tbl: String = "dm_app_category"
-  val dm_tag_tbl: String = "dm_app_tag"
+  val STAT_APP_INSTALLED_TBL: String = "stat_app_installed_tbl"
+  val STAT_APP_OPEN_TBL: String = "stat_app_open_tbl"
+  val JOIN_MAP: String = "joinMap"
 
   def main(args: Array[String]): Unit = {
-    if (args.length < 3) {
+    if (args.length < 5) {
       val usage =
         """
-          Usage: input_path_pattern, date, output_path
+          Usage: date, input_path_pattern, appMetaPath, hiveTable, mode
         """.stripMargin
     }
     // 20181120
@@ -27,20 +28,41 @@ object ApplisFeturesConvertApp {
     //  /Users/yangqingfeng/tmp/debug/applist/date_p={DATE}/app_key_p={APP_KEY}/type_p={FILE_TYPE}/{FILE_TYPE}_{DATE}.txt
     val pathPattern = args(1)
     val appMetaPath = args(2)
+    val hiveTable = args(3)
+    val mode = args(4)
 
-    val sparkSession = SparkSession.builder().master("local[2]").appName("Analysis app list").getOrCreate()
+    val spark = if (mode.equals("local")) {
+      SparkSession.builder().master("local[5]").appName("Applist Features").getOrCreate()
+    } else {
+      SparkSession.builder().master("local[5]").appName("Applist Features").getOrCreate()
+      //SparkSession.builder().enableHiveSupport().appName("Applist Features").getOrCreate()
+    }
+
+    spark.udf.register("joinMap", (values: Seq[Map[String, Long]]) => {
+      values.flatten.toMap
+    })
 
     // 1. load app metadata
-    initAppMetaTable(appMetaPath, sparkSession)
-   /* val appPKgMetaDF: Dataset[AppMeta] = loadAppPkgMetaDataFrame(appMetaPath, sparkSession)
-    appPKgMetaDF.createOrReplaceTempView(s"$dm_swa_app_tag")
-    appPKgMetaDF.persist(StorageLevel.MEMORY_AND_DISK)
-    // 2. calclulate appInstalled
-    //val joinUseageDF: Dataset[Row] = calculateInstalledAppDF(sparkSession, date, pathPattern)
-*/
-    calculateOpenAppDF(sparkSession, date, pathPattern)
+    initAppMetaTable(appMetaPath, spark)
+    calculateInstallApp(spark, date, pathPattern)
+    calculateOpenAppDF(spark, date, pathPattern)
 
-    sparkSession.stop()
+    val resultTblDF : DataFrame = spark.sql(
+      s"""
+        select i.guid, installApp, installCategoryCount, installSubCategoryCount, installTagCount,
+              openAppDays, openAppTimes, openCategoryDays, openCategoryTimes, openSubCategoryDays,
+              openSubCategoryTimes, openTagDays, openTagTimes
+        from $STAT_APP_INSTALLED_TBL i left join $STAT_APP_OPEN_TBL o on i.guid=o.guid
+      """.stripMargin)
+
+    if (mode.equals("local")) {
+      //resultTblDF.printSchema()
+      resultTblDF.show(50, false)
+    } else {
+      resultTblDF.write.saveAsTable(hiveTable)
+    }
+
+    spark.stop()
   }
 
 
@@ -52,193 +74,161 @@ object ApplisFeturesConvertApp {
     //openAppDF.show(3, false)
 
     val app_open_action_tbl = "app_open_action_tbl"
-    spark.sql(s"select guid, app_name, from_unixtime(cast(opt_time.open_time as bigint)/1000, 'yyyyMMdd') optTime from $app_open_tbl LATERAL VIEW explode(open_time_and_ip) opt_a AS opt_time ") //@TODO debug
+    spark.sql(s"select guid, appName, from_unixtime(cast(opt_time.open_time as bigint)/1000, 'yyyyMMdd') optTime from $app_open_tbl LATERAL VIEW explode(open_time_and_ip) opt_a AS opt_time ")
       .createOrReplaceTempView(s"$app_open_action_tbl")
-/*
-
-    /* 1. 安装app计算使用频次 */
-    val user_app_open_freq_tbl = "user_app_open_freq_tbl"
-    spark.sql(s"select guid, app_name, count(distinct optTime) as openDayCount, count(optTime) as openTimes from $app_open_action_tbl group by guid, app_name ")
-      .createOrReplaceTempView(s"$user_app_open_freq_tbl")
-
-    val userAppOpenTbl = "user_app_open_stat_tbl"
-    spark.sql(s"select guid, struct(app_name, openDayCount) as appOpenDayCount, struct(app_name, openTimes) appOpenTimes from $user_app_open_freq_tbl")
-        .createOrReplaceTempView(s"$userAppOpenTbl")
-*/
 
 
-    /* 2. 按app类别计算使用频次 */
-    /* 2.1 category 统计 */
+    // 1. 按app统计使用频次
     spark.sql(
       s"""
-          select guid, collect_list(category_openDayCount) as category_openDayCount, collect_list(category_openTimes) as category_openTimes
+          select guid, $JOIN_MAP(collect_list(map(appName, dayCount))) as openAppDays, $JOIN_MAP(collect_list(map(appName, times))) as openAppTimes
           from(
-            select a.guid, struct(m.category, count(distinct a.optTime)) as category_openDayCount, struct(m.category, count(optTime)) as category_openTimes
-              from $app_open_action_tbl a inner join $DM_APP_CATEGORY_TAGS m on a.app_name=m.app_name
+             select guid, a.appName as appName, count(distinct optTime) as dayCount, count(optTime) as times
+               from $app_open_action_tbl a
+               where a.appName is not null and length(a.appName) > 0
+               group by guid, a.appName
+             ) group by guid
+       """.stripMargin).createOrReplaceTempView("user_app_open_stat_tbl")
+
+    // 2. 按app类别计算使用频次
+    // 2.1 category 统计
+    spark.sql(
+      s"""
+          select guid, $JOIN_MAP(collect_list(map(category, openDayCount))) as openCategoryDays, $JOIN_MAP(collect_list(map(category, openTimes))) as openCategoryTimes
+          from(
+            select a.guid, m.category, count(distinct a.optTime) as openDayCount, count(optTime) as openTimes
+              from $app_open_action_tbl a inner join $DM_CATEGORY_TBL m on a.appName=m.appName
               where category is not null and length(category) > 0
               group by guid, category
             ) group by guid
       """.stripMargin).createOrReplaceTempView("tmp_category_open_stat_final")
 
+    // 2.2 subCategory 统计
     spark.sql(
       s"""
-          select guid, collect_list(subCategory_openDayCount) as subCategory_openDayCount, collect_list(subCategory_openTimes) as subCategory_openTimes
+          select guid, $JOIN_MAP(collect_list(map(subCategory, openDayCount))) as openSubCategoryDays, $JOIN_MAP(collect_list(map(subCategory, openTimes))) as openSubCategoryTimes
           from(
-             select a.guid, struct(m.subCategory, count(distinct a.optTime)) as subCategory_openDayCount, struct(m.subCategory, count(optTime)) as subCategory_openTimes
-               from $app_open_action_tbl a inner join $DM_APP_CATEGORY_TAGS m on a.app_name=m.app_name
+             select a.guid, m.subCategory, count(distinct a.optTime) as openDayCount, count(optTime) as openTimes
+               from $app_open_action_tbl a inner join $DM_SUB_CATEGORY_TBL m on a.appName=m.appName
                 where subCategory is not null and length(subCategory) > 0
                group by guid, subCategory
            ) group by guid
       """.stripMargin).createOrReplaceTempView("tmp_subCategory_open_stat_final")
 
-    /* 2.2 计算tags标签使用次数 */
-    spark.sql(s"select app_name, split(tags, ',') as tag_array from $DM_APP_CATEGORY_TAGS where tags is not null and length(tags) > 0 ").createOrReplaceTempView("app_tags_meta")
-    spark.sql("select app_name, tag from app_tags_meta LATERAL VIEW explode(tag_array) tag_tbl as tag ").createOrReplaceTempView("app_tag_mapping")
-    /*spark.sql(s"select a.guid, a.app_name, a.optTime, m.tag from $app_open_action_tbl a left join app_tag_mapping m on a.app_name=m.app_name ").createOrReplaceTempView("tmp_tag_open_action")
-    spark.sql("select guid, tag, count(distinct optTime) as openDayCount, count(optTime) as openTimes from tmp_tag_open_action group by guid, tag ").createOrReplaceTempView("tmp_tag_open_stat")
-    spark.sql("select guid, struct(tag, openDayCount) as tag_open_day_count, struct(tag, openTimes) as tag_open_times from tmp_tag_open_stat").createOrReplaceTempView("tmp_tag_open_stat_final")
-*/
+    // 3. 计算tags标签使用次数
     spark.sql(
       s"""
-        select guid, collect_list(tag_open_day_count) as tag_open_day_count, collect_list(tag_open_times) as tag_open_times
+        select guid, $JOIN_MAP(collect_list(map(tag, openDayCount))) as openTagDays, $JOIN_MAP(collect_list(map(tag, openTimes))) as openTagTimes
         from (
-          select guid, struct(tag, count(distinct optTime)) as tag_open_day_count, struct(tag, count(optTime)) as tag_open_times
-          from $app_open_action_tbl a inner join app_tag_mapping m on a.app_name=m.app_name
+          select guid, tag, count(distinct optTime) as openDayCount, count(optTime) as openTimes
+          from $app_open_action_tbl a inner join $DM_TAG_TBL m on a.appName=m.appName
           group by guid, tag
         ) group by guid
       """.stripMargin).createOrReplaceTempView("tmp_tag_open_stat_final")
 
     spark.sql(
       """
-        select c.guid, category_openDayCount, category_openTimes, subCategory_openDayCount, subCategory_openTimes, tag_open_day_count, tag_open_times
-        from tmp_category_open_stat_final c left join tmp_subCategory_open_stat_final s on c.guid=s.guid
-              left join tmp_tag_open_stat_final t on c.guid=t.guid
-      """.stripMargin).show(3, false)
+        select a.guid, openAppDays, openAppTimes, openCategoryDays, openCategoryTimes, openSubCategoryDays, openSubCategoryTimes, openTagDays, openTagTimes
+        from user_app_open_stat_tbl a
+          left join tmp_category_open_stat_final c on a.guid=c.guid
+          left join tmp_subCategory_open_stat_final s on a.guid=s.guid
+          left join tmp_tag_open_stat_final t on a.guid=t.guid
+      """.stripMargin).createOrReplaceTempView(STAT_APP_OPEN_TBL)
 
-   /* spark.sql(
-      """
-         select * from
-         (
-          select c.guid, category_openDayCount, category_openTimes, subCategory_openDayCount, subCategory_openTimes
-          from tmp_category_open_stat_final c left join tmp_subCategory_open_stat_final s on c.guid=s.guid
-          ) a left join ( select * from tmp_tag_open_stat_final ) t on a.guid=t.guid
-      """.stripMargin).show(3, false)*/
   }
 
+  def calculateInstallApp(spark: SparkSession, date: String,
+                          pathPattern: String): Unit = {
+    val applistDF: DataFrame = loadInstallAppDataFrame(date, pathPattern, spark)
+    val tmp_installed_applist = "tmp_installed_applist"
+    applistDF.persist(StorageLevel.MEMORY_AND_DISK).createOrReplaceTempView(s"$tmp_installed_applist")
 
-  def calculateInstalledAppDF(sparkSession: SparkSession, date: String,
-                              pathPattern: String): DataFrame = {
-    import sparkSession.implicits._
-    val applistDF: DataFrame = loadInstallAppDataFrame(date, pathPattern, sparkSession)
-    applistDF.persist(StorageLevel.MEMORY_AND_DISK_SER)
+    // 1. install apps
+    val tmp_installed_app = "tmp_installed_app"
+    spark.sql(
+      s"""
+        select guid, appName
+        from tmp_installed_applist LATERAL VIEW explode(installed_applist) as appName
+      """.stripMargin).createOrReplaceTempView("tmp_installed_app")
 
-    val guidTagAppDF: Dataset[GuidInstalledApp] = applistDF.flatMap{ row =>
-      val guid: String = row.getString(0).trim
-      row.getSeq[String](1).map(pkg => GuidInstalledApp(guid, pkg.trim))
-    }
-    guidTagAppDF.createOrReplaceTempView("gid_pkg_table")
+    // 2. category
+    // 2.1 category install stat
+    spark.sql(
+      s"""
+        select guid, $JOIN_MAP(collect_list(map(category, count))) as installCategoryCount
+          from (
+            select guid, category, count(distinct c.appName) as count
+            from $tmp_installed_app i inner join $DM_CATEGORY_TBL c on i.appName=c.appName
+            group by guid, category
+          ) t
+          group by guid
+      """.stripMargin).createOrReplaceTempView("tmp_app_category_installed_final")
 
 
-    val joinSQL =
-      """
-        select a.guid, a.appPkg, m.category, m.subCategory, m.tags
-        from gid_pkg_table a left join dm_swa_app_tag m
-        on a.appPkg=m.pkg
-      """.stripMargin
-    val userAppMetaDF: DataFrame = sparkSession.sql(joinSQL)
-    val userAppCategoryKeyDF: Dataset[String] = userAppMetaDF.flatMap(row => extractUserCategoryNTags(row))
-    //userAppCategoryKeyDF.show(5, false)
+    // 2.2 subCategory install stat @TODO
+    spark.sql(
+      s"""
+         select guid, $JOIN_MAP(collect_list(map(subCategory, count))) as installSubCategoryCount
+                 from (
+                   select guid, subCategory, count(distinct c.appName) as count
+                   from $tmp_installed_app i inner join $DM_SUB_CATEGORY_TBL c on i.appName=c.appName
+                   group by guid, subCategory
+                 ) t
+                 group by guid
+      """.stripMargin).createOrReplaceTempView("tmp_app_subCategory_installed_final")
 
-    //(guid|category|category_value, num) / (guid|tags|tag, num)
-    //val categoryOccursDF: DataFrame = userAppCategoryKeyDF.map(key => (key, 1)).groupBy($"_1").sum("_2")
+    // 3. tags installed
+    spark.sql(
+      s"""
+         select guid, $JOIN_MAP(collect_list(map(tag, count))) as installTagCount
+         from (
+           select guid, tag, count(distinct tag) as count
+           from $tmp_installed_app i inner join $DM_TAG_TBL t on i.appName=t.appName
+           group by guid, tag
+         ) t
+         group by guid
+       """.stripMargin).createOrReplaceTempView("tmp_app_tag_installed_final")
 
-    // (guid|category|category_value, num) / (guid|tags|tag, num)
-    val userAppCategoryOccursDF: RDD[(String, Int)] = userAppCategoryKeyDF.rdd.map(key => (key, 1)).reduceByKey(_ + _)
-    //userAppCategoryOccursDF.take(5)
-    // 923296ca30d7a982cc7b178c3db318ec,tags|社区:1,subCategory|交友:1,category|通讯社交:3
-    val userCategoryOccursStrRdd: RDD[(String, String)] = userAppCategoryOccursDF.map{ case(guidCategoryKey, count) =>
-      val firstSepIndex: Int = guidCategoryKey.indexOf("|")
-      val guid: String = guidCategoryKey.substring(0, firstSepIndex)
-      val categoryOccur: String = guidCategoryKey.substring(firstSepIndex + 1)
-      guid -> s"$categoryOccur|$count"
-    }.reduceByKey{ case(str1, str2) =>
-      s"$str1,$str2"
-    }
+    // 4. final join all the data
+    spark.sql(
+      s"""
+          select i.guid, installed_applist as installApp, installCategoryCount, installSubCategoryCount, installTagCount
+          from $tmp_installed_applist i
+            left join tmp_app_category_installed_final c on i.guid=c.guid
+            left join tmp_app_subCategory_installed_final s on i.guid=s.guid
+            left join tmp_app_tag_installed_final t on i.guid=t.guid
+       """.stripMargin).createOrReplaceTempView(s"$STAT_APP_INSTALLED_TBL")
 
-    case class CategoryOccurs(categoryType: String, categoryKey: String, occurs: Int)
-    val userCategoryOccurRdd: RDD[(String, Array[CategoryOccurs])] = userCategoryOccursStrRdd.mapValues{ categoryOccursStrSeq: String =>
-      categoryOccursStrSeq.split(",").map{ occursStr =>
-        val parts: Array[String] = occursStr.split("\\|")
-        try {
-          parts(2).toInt
-        } catch {
-          case e: Exception => println(s"occursStr=$occursStr, e=$e")
-        }
-        CategoryOccurs(parts(0), parts(1), parts(2).toInt)
-      }
-    }
-
-    //import sparkSession.sqlContext.implicits._
-    import sparkSession.implicits._
-
-    val userCategoryUsageDF: Dataset[UserCategoryInstalled]= userCategoryOccurRdd.map { case (guid: String, categoryOccurArr: Array[CategoryOccurs]) =>
-      val categoryUsageArr: Array[CategoryInstalled] = categoryOccurArr.filter(categoryOccur => categoryOccur.categoryType.equals("category")).map(categoryOccur => CategoryInstalled(categoryOccur.categoryKey, categoryOccur.occurs))
-      val subCategoryUsageArr: Array[CategoryInstalled] = categoryOccurArr.filter(categoryOccur => categoryOccur.categoryType.equals("subCategory")).map(categoryOccur => CategoryInstalled(categoryOccur.categoryKey, categoryOccur.occurs))
-      val tagUsageArr: Array[CategoryInstalled] = categoryOccurArr.filter(categoryOccur => categoryOccur.categoryType.equals("tags")).map(categoryOccur => CategoryInstalled(categoryOccur.categoryKey, categoryOccur.occurs))
-      UserCategoryInstalled(guid, categoryUsageArr, subCategoryUsageArr, tagUsageArr)
-    }.toDS
-    //userCategoryUsageDF.sample(true, 0.2).show(10, false)
-    val joinUseageDF = applistDF.join(userCategoryUsageDF, applistDF("guid") === userCategoryUsageDF("guid"), "left_outer")
-      .select(applistDF("guid"), applistDF("installed_applist"), userCategoryUsageDF("categoryUsage"), userCategoryUsageDF("subCategoryUsage"), userCategoryUsageDF("tagUsage"))
-
-    return joinUseageDF
-    //println(userCategoryOccursStrRdd.take(5).mkString("\n"))
-    //categoryOccursDF.rdd.map(row => row.getString(0))
-  }
-
-  /*
-   * Row(guid, appPkg, pkg, category, subCategory, tags)
-   */
-  def extractUserCategoryNTags(row: Row): Seq[String] = {
-    val arrBuf: ArrayBuffer[String] = new ArrayBuffer[String]()
-
-    if (row.getString(2) != null) {
-      val userCategory: String = s"${row.getString(0)}|category|${row.getString(2)}"
-      arrBuf += userCategory
-    }
-
-    if (row.getString(3) != null) {
-      val userSugCategory: String = s"${row.getString(0)}|subCategory|${row.getString(3)}"
-      arrBuf += userSugCategory
-    }
-
-    val tags: String = row.getString(4)
-    if (tags != null && tags.length > 0) {
-      tags.split(",").foreach{ tag =>
-        val userTag: String = s"${row.getString(0)}|tags|$tag"
-        arrBuf += userTag
-      }
-    }
-    arrBuf
-  }
-
-  def loadAppPkgMetaDataFrame(path: String, sparkSession: SparkSession): Dataset[AppMeta] = {
-    import sparkSession.implicits._
-    val appMetaDF: DataFrame = sparkSession.read.option("delimiter", "\t").format("csv").csv(path)
-    appMetaDF.flatMap{row =>
-      Seq[AppMeta](AppMeta(row.getString(2), row.getString(5), row.getString(7), row.getString(10)),
-        AppMeta(row.getString(3), row.getString(5), row.getString(7), row.getString(10))
-      )
-    }
+    //spark.sql(s"select * from tmp_app_category_installed_final").printSchema()
   }
 
   def initAppMetaTable(path: String, spark: SparkSession):Unit = {
     import spark.implicits._
+    val DM_APP_CATEGORY_TAGS_TBL: String = "dm_app_category_tags"
     val appMetaDF: DataFrame = spark.read.option("delimiter", "\t").format("csv").csv(path)
     appMetaDF.createOrReplaceTempView("dm_swa_app_tag_raw")
-    spark.sql("select _c2 as app_name, _c3 as app_pkg, _c5 as category, _c7 as subCategory, _c10 as tags from dm_swa_app_tag_raw")
-      .persist(StorageLevel.MEMORY_AND_DISK).createOrReplaceTempView(DM_APP_CATEGORY_TAGS)
+    val dmCategoryTagsMetaDF:DataFrame = spark.sql("select _c2 as appName, _c3 as appPkg, _c5 as category, _c7 as subCategory, _c10 as tags from dm_swa_app_tag_raw")
+      .persist(StorageLevel.MEMORY_AND_DISK)
+    dmCategoryTagsMetaDF.persist(StorageLevel.MEMORY_AND_DISK).createOrReplaceTempView(DM_APP_CATEGORY_TAGS_TBL)
 
+    spark.sql(
+      s"""
+        select appName, appPkg, category
+        from $DM_APP_CATEGORY_TAGS_TBL
+        where category is not null and length(category) > 0
+      """.stripMargin).persist(StorageLevel.MEMORY_AND_DISK).createOrReplaceTempView(DM_CATEGORY_TBL)
+
+    spark.sql(
+      s"""
+        select appName, appPkg, subCategory
+        from $DM_APP_CATEGORY_TAGS_TBL
+        where subCategory is not null and length(subCategory) > 0
+      """.stripMargin).persist(StorageLevel.MEMORY_AND_DISK).createOrReplaceTempView(DM_SUB_CATEGORY_TBL)
+
+    spark.sql(s"select appName, split(tags, ',') as tag_array from $DM_APP_CATEGORY_TAGS_TBL where tags is not null and length(tags) > 0 ").createOrReplaceTempView("app_tags_meta")
+    spark.sql("select appName, tag from app_tags_meta LATERAL VIEW explode(tag_array) tag_tbl as tag ").createOrReplaceTempView(DM_TAG_TBL)
+
+    dmCategoryTagsMetaDF.unpersist()
     //spark.sql("select * from dm_app_category_tags ").show(3, false)
   }
 
@@ -248,27 +238,15 @@ object ApplisFeturesConvertApp {
 
     val jsonDF = sparkSession.read.format("json").json(json_exists_paths:_*)
     val applistDF: DataFrame = jsonDF.select("guid", "installed_applist").filter(row => !row.isNullAt(0))
-
-    //val guidTagDF: Dataset[(String, String)] = applistDF.flatMap(row => row.getSeq[String](1).map((_, row.getString(0))))
-    /*val guidTagAppDF: Dataset[GuidInstalledPkg] = applistDF.flatMap{row =>
-      val guid: String = row.getString(0).trim
-      row.getSeq[String](1).map(pkg => GuidInstalledPkg(guid, pkg.trim))
-    }*/
-
     applistDF
   }
 
   def loadOpenAppDataFrame(date: String, pathPattern: String, sparkSession: SparkSession): DataFrame = {
+    import sparkSession.implicits._
     val json_exists_paths = new JsonFilePathGenerator(pathPattern, date, sparkSession).getOpenedAppJsonFilePaths
     val jsonDF = sparkSession.read.format("json").json(json_exists_paths:_*)
-    val openAppDF = jsonDF.select("guid", "app_name", "open_time_and_ip").filter(row => !row.isNullAt(0))
+    val openAppDF = jsonDF.select($"guid", $"app_name".alias("appName"), $"open_time_and_ip").filter(row => !row.isNullAt(0))
     openAppDF
   }
 
 }
-
-case class GuidInstalledApp(guid: String, appPkg: String)
-case class AppMeta(pkg: String, category: String, subCategory: String, tags: String)
-
-case class CategoryInstalled(category: String, occurs: Int)
-case class UserCategoryInstalled(guid: String, categoryUsage: Array[CategoryInstalled], subCategoryUsage: Array[CategoryInstalled], tagUsage: Array[CategoryInstalled])

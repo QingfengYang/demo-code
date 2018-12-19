@@ -4,13 +4,11 @@
   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>com.lab.spark</groupId>
-  <artifactId>demo1</artifactId>
+  <groupId>com.lab.spark.feature.engineer</groupId>
+  <artifactId>ApplisFetures</artifactId>
   <version>1.0-SNAPSHOT</version>
 
-  <name>demo1</name>
-  <!-- FIXME change it to the project's website -->
-  <url>http://www.example.com</url>
+  <name>ApplisFeturesConvertApp</name>
 
   <properties>
     <scala_tag>2.11</scala_tag>
@@ -140,7 +138,6 @@
       <plugin>
         <artifactId>maven-assembly-plugin</artifactId>
         <configuration>
-
           <descriptorRefs>
             <descriptorRef>jar-with-dependencies</descriptorRef>
           </descriptorRefs>
