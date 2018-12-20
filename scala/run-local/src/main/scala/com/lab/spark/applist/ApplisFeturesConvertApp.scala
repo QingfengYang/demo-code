@@ -3,7 +3,7 @@ package com.lab.spark.applist
 import java.sql.Struct
 
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{Column, DataFrame, SparkSession}
+import org.apache.spark.sql.{Column, DataFrame, SaveMode, SparkSession}
 import org.apache.spark.storage.StorageLevel
 
 object ApplisFeturesConvertApp {
@@ -32,10 +32,11 @@ object ApplisFeturesConvertApp {
     val mode = args(4)
 
     val spark = if (mode.equals("local")) {
+      println(s"run in local")
       SparkSession.builder().master("local[5]").appName("Applist Features").getOrCreate()
     } else {
-      SparkSession.builder().master("local[5]").appName("Applist Features").getOrCreate()
-      //SparkSession.builder().enableHiveSupport().appName("Applist Features").getOrCreate()
+      println(s"run in prod")
+      SparkSession.builder().enableHiveSupport().appName("Applist Features").getOrCreate()
     }
 
     spark.udf.register("joinMap", (values: Seq[Map[String, Long]]) => {
@@ -45,22 +46,35 @@ object ApplisFeturesConvertApp {
     // 1. load app metadata
     initAppMetaTable(appMetaPath, spark)
     calculateInstallApp(spark, date, pathPattern)
-    calculateOpenAppDF(spark, date, pathPattern)
+    //calculateOpenAppDF(spark, date, pathPattern)
+/*
 
     val resultTblDF : DataFrame = spark.sql(
       s"""
-        select i.guid, installApp, installCategoryCount, installSubCategoryCount, installTagCount,
-              openAppDays, openAppTimes, openCategoryDays, openCategoryTimes, openSubCategoryDays,
-              openSubCategoryTimes, openTagDays, openTagTimes
+        select i.guid,
+              installApp as install_app,
+              installCategoryCount as install_category_count,
+              installSubCategoryCount as install_subsategory_count,
+              installTagCount as install_tag_count,
+              openAppDays as open_app_days,
+              openAppTimes as open_app_times,
+              openCategoryDays as open_category_days,
+              openCategoryTimes as open_category_times,
+              openSubCategoryDays as open_subcategory_days,
+              openSubCategoryTimes as open_subcategory_times,
+              openTagDays as open_tag_days,
+              openTagTimes as open_tag_times,
+              $date as date_p
         from $STAT_APP_INSTALLED_TBL i left join $STAT_APP_OPEN_TBL o on i.guid=o.guid
       """.stripMargin)
 
     if (mode.equals("local")) {
-      //resultTblDF.printSchema()
-      resultTblDF.show(50, false)
+      resultTblDF.printSchema()
+      //resultTblDF.show(50, false)
     } else {
-      resultTblDF.write.saveAsTable(hiveTable)
+      resultTblDF.write.partitionBy("date_p").mode(SaveMode.ErrorIfExists).saveAsTable(hiveTable)
     }
+*/
 
     spark.stop()
   }
@@ -143,6 +157,12 @@ object ApplisFeturesConvertApp {
     val tmp_installed_applist = "tmp_installed_applist"
     applistDF.persist(StorageLevel.MEMORY_AND_DISK).createOrReplaceTempView(s"$tmp_installed_applist")
 
+    import spark.implicits._
+    import org.apache.spark.sql.functions._
+    // @TODO debug
+    applistDF.groupBy("guid").agg(count($"installed_applist") as "count").sort($"count".desc).show(10, false)
+/*
+
     // 1. install apps
     val tmp_installed_app = "tmp_installed_app"
     spark.sql(
@@ -165,7 +185,7 @@ object ApplisFeturesConvertApp {
       """.stripMargin).createOrReplaceTempView("tmp_app_category_installed_final")
 
 
-    // 2.2 subCategory install stat @TODO
+    // 2.2 subCategory install stat
     spark.sql(
       s"""
          select guid, $JOIN_MAP(collect_list(map(subCategory, count))) as installSubCategoryCount
@@ -198,6 +218,7 @@ object ApplisFeturesConvertApp {
             left join tmp_app_subCategory_installed_final s on i.guid=s.guid
             left join tmp_app_tag_installed_final t on i.guid=t.guid
        """.stripMargin).createOrReplaceTempView(s"$STAT_APP_INSTALLED_TBL")
+*/
 
     //spark.sql(s"select * from tmp_app_category_installed_final").printSchema()
   }
@@ -238,6 +259,7 @@ object ApplisFeturesConvertApp {
 
     val jsonDF = sparkSession.read.format("json").json(json_exists_paths:_*)
     val applistDF: DataFrame = jsonDF.select("guid", "installed_applist").filter(row => !row.isNullAt(0))
+
     applistDF
   }
 
