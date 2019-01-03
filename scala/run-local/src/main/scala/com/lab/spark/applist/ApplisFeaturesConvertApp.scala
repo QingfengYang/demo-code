@@ -1,17 +1,15 @@
 package com.lab.spark.applist
 
-import java.sql.Struct
-
-import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{Column, DataFrame, SaveMode, SparkSession}
 import org.apache.spark.storage.StorageLevel
 
-object ApplisFeturesConvertApp {
+object ApplisFeaturesConvertApp {
 
   val DM_CATEGORY_TBL: String = "dm_app_category"
   val DM_SUB_CATEGORY_TBL: String = "dm_app_sub_category"
   val DM_TAG_TBL: String = "dm_app_tag"
 
+  val FLATTEN_GUID_APP_INSTALLED = "flatten_guid_app_installed"
   val STAT_APP_INSTALLED_TBL: String = "stat_app_installed_tbl"
   val STAT_APP_OPEN_TBL: String = "stat_app_open_tbl"
   val JOIN_MAP: String = "joinMap"
@@ -25,18 +23,25 @@ object ApplisFeturesConvertApp {
     }
     // 20181120
     val date = args(0)
+    // 30
+    val daysRange = args(1).toInt
+    val dateSeq: Seq[String] = DateUtil.genDateSeq(date, daysRange)
     //  /Users/yangqingfeng/tmp/debug/applist/date_p={DATE}/app_key_p={APP_KEY}/type_p={FILE_TYPE}/{FILE_TYPE}_{DATE}.txt
-    val pathPattern = args(1)
-    val appMetaPath = args(2)
-    val hiveTable = args(3)
-    val mode = args(4)
+    val pathPattern = args(2)
+    val appMetaPath = args(3)
+    val hiveTable = args(4)
+    val mode = args(5)
 
     val spark = if (mode.equals("local")) {
       println(s"run in local")
       SparkSession.builder().master("local[5]").appName("Applist Features").getOrCreate()
     } else {
       println(s"run in prod")
-      SparkSession.builder().enableHiveSupport().appName("Applist Features").getOrCreate()
+      val spark = SparkSession.builder().enableHiveSupport().appName("Applist Features").getOrCreate()
+      spark.sqlContext.setConf("hive.exec.dynamic.partition", "true")
+      spark.sqlContext.setConf("hive.exec.dynamic.partition.mode", "nonstrict")
+
+      spark
     }
 
     spark.udf.register("joinMap", (values: Seq[Map[String, Long]]) => {
@@ -45,9 +50,8 @@ object ApplisFeturesConvertApp {
 
     // 1. load app metadata
     initAppMetaTable(appMetaPath, spark)
-    calculateInstallApp(spark, date, pathPattern)
-    //calculateOpenAppDF(spark, date, pathPattern)
-/*
+    calculateInstallApp(spark, dateSeq, pathPattern)
+    calculateOpenAppDF(spark, dateSeq, pathPattern)
 
     val resultTblDF : DataFrame = spark.sql(
       s"""
@@ -69,20 +73,21 @@ object ApplisFeturesConvertApp {
       """.stripMargin)
 
     if (mode.equals("local")) {
-      resultTblDF.printSchema()
-      //resultTblDF.show(50, false)
+      //resultTblDF.printSchema()
+      resultTblDF.show(50, false)
     } else {
-      resultTblDF.write.partitionBy("date_p").mode(SaveMode.ErrorIfExists).saveAsTable(hiveTable)
+      //resultTblDF.write.partitionBy("date_p").mode(SaveMode.ErrorIfExists).saveAsTable(hiveTable)
+      //resultTblDF.write.partitionBy("date_p").mode(SaveMode.ErrorIfExists).insertInto(hiveTable) 已经存在的partiton 不需要 partitionBy
+      resultTblDF.write.mode(SaveMode.ErrorIfExists).insertInto(hiveTable)
     }
-*/
 
     spark.stop()
   }
 
 
-  def calculateOpenAppDF(spark: SparkSession, date: String,
+  def calculateOpenAppDF(spark: SparkSession, dateSeq: Seq[String],
                          pathPattern: String): Unit = {
-    val openAppDF = loadOpenAppDataFrame(date, pathPattern, spark)
+    val openAppDF = loadOpenAppDataFrame(dateSeq, pathPattern, spark)
     val app_open_tbl = "app_open_tbl"
     openAppDF.createOrReplaceTempView(s"$app_open_tbl")
     //openAppDF.show(3, false)
@@ -151,25 +156,15 @@ object ApplisFeturesConvertApp {
 
   }
 
-  def calculateInstallApp(spark: SparkSession, date: String,
+  def calculateInstallApp(spark: SparkSession, dateSeq: Seq[String],
                           pathPattern: String): Unit = {
-    val applistDF: DataFrame = loadInstallAppDataFrame(date, pathPattern, spark)
-    val tmp_installed_applist = "tmp_installed_applist"
-    applistDF.persist(StorageLevel.MEMORY_AND_DISK).createOrReplaceTempView(s"$tmp_installed_applist")
+    loadInstallAppDataFrame(dateSeq, pathPattern, spark)
+/*
 
     import spark.implicits._
     import org.apache.spark.sql.functions._
-    // @TODO debug
     applistDF.groupBy("guid").agg(count($"installed_applist") as "count").sort($"count".desc).show(10, false)
-/*
-
-    // 1. install apps
-    val tmp_installed_app = "tmp_installed_app"
-    spark.sql(
-      s"""
-        select guid, appName
-        from tmp_installed_applist LATERAL VIEW explode(installed_applist) as appName
-      """.stripMargin).createOrReplaceTempView("tmp_installed_app")
+*/
 
     // 2. category
     // 2.1 category install stat
@@ -178,7 +173,7 @@ object ApplisFeturesConvertApp {
         select guid, $JOIN_MAP(collect_list(map(category, count))) as installCategoryCount
           from (
             select guid, category, count(distinct c.appName) as count
-            from $tmp_installed_app i inner join $DM_CATEGORY_TBL c on i.appName=c.appName
+            from $FLATTEN_GUID_APP_INSTALLED i inner join $DM_CATEGORY_TBL c on i.appName=c.appName
             group by guid, category
           ) t
           group by guid
@@ -191,7 +186,7 @@ object ApplisFeturesConvertApp {
          select guid, $JOIN_MAP(collect_list(map(subCategory, count))) as installSubCategoryCount
                  from (
                    select guid, subCategory, count(distinct c.appName) as count
-                   from $tmp_installed_app i inner join $DM_SUB_CATEGORY_TBL c on i.appName=c.appName
+                   from $FLATTEN_GUID_APP_INSTALLED i inner join $DM_SUB_CATEGORY_TBL c on i.appName=c.appName
                    group by guid, subCategory
                  ) t
                  group by guid
@@ -203,7 +198,7 @@ object ApplisFeturesConvertApp {
          select guid, $JOIN_MAP(collect_list(map(tag, count))) as installTagCount
          from (
            select guid, tag, count(distinct tag) as count
-           from $tmp_installed_app i inner join $DM_TAG_TBL t on i.appName=t.appName
+           from $FLATTEN_GUID_APP_INSTALLED i inner join $DM_TAG_TBL t on i.appName=t.appName
            group by guid, tag
          ) t
          group by guid
@@ -213,12 +208,16 @@ object ApplisFeturesConvertApp {
     spark.sql(
       s"""
           select i.guid, installed_applist as installApp, installCategoryCount, installSubCategoryCount, installTagCount
-          from $tmp_installed_applist i
-            left join tmp_app_category_installed_final c on i.guid=c.guid
-            left join tmp_app_subCategory_installed_final s on i.guid=s.guid
-            left join tmp_app_tag_installed_final t on i.guid=t.guid
+          from (
+             select guid, collect_list(appName) as installed_applist
+             from $FLATTEN_GUID_APP_INSTALLED
+             group by guid
+          ) i
+           left join tmp_app_category_installed_final c on i.guid=c.guid
+           left join tmp_app_subCategory_installed_final s on i.guid=s.guid
+           left join tmp_app_tag_installed_final t on i.guid=t.guid
+
        """.stripMargin).createOrReplaceTempView(s"$STAT_APP_INSTALLED_TBL")
-*/
 
     //spark.sql(s"select * from tmp_app_category_installed_final").printSchema()
   }
@@ -254,18 +253,25 @@ object ApplisFeturesConvertApp {
   }
 
 
-  def loadInstallAppDataFrame(date: String, pathPattern: String, sparkSession: SparkSession): DataFrame = {
-    val json_exists_paths = new JsonFilePathGenerator(pathPattern, date, sparkSession).getInstalledAppJsonFilePaths
+  def loadInstallAppDataFrame(dateSeq: Seq[String], pathPattern: String, spark: SparkSession): Unit = {
+    val json_exists_paths = new JsonFilePathGenerator(pathPattern, dateSeq, spark).getInstalledAppJsonFilePaths
 
-    val jsonDF = sparkSession.read.format("json").json(json_exists_paths:_*)
+    val jsonDF = spark.read.format("json").json(json_exists_paths:_*)
     val applistDF: DataFrame = jsonDF.select("guid", "installed_applist").filter(row => !row.isNullAt(0))
+    val tmp_installed_applist_orig = "tmp_installed_applist_orig"
+    applistDF.createOrReplaceTempView(s"$tmp_installed_applist_orig")
 
-    applistDF
+    // 1. install apps
+    spark.sql(
+      s"""
+        select distinct guid, appName
+        from $tmp_installed_applist_orig LATERAL VIEW explode(installed_applist) as appName
+      """.stripMargin).persist(StorageLevel.MEMORY_AND_DISK).createOrReplaceTempView(s"$FLATTEN_GUID_APP_INSTALLED")
   }
 
-  def loadOpenAppDataFrame(date: String, pathPattern: String, sparkSession: SparkSession): DataFrame = {
+  def loadOpenAppDataFrame(dateSeq: Seq[String], pathPattern: String, sparkSession: SparkSession): DataFrame = {
     import sparkSession.implicits._
-    val json_exists_paths = new JsonFilePathGenerator(pathPattern, date, sparkSession).getOpenedAppJsonFilePaths
+    val json_exists_paths = new JsonFilePathGenerator(pathPattern, dateSeq, sparkSession).getOpenedAppJsonFilePaths
     val jsonDF = sparkSession.read.format("json").json(json_exists_paths:_*)
     val openAppDF = jsonDF.select($"guid", $"app_name".alias("appName"), $"open_time_and_ip").filter(row => !row.isNullAt(0))
     openAppDF

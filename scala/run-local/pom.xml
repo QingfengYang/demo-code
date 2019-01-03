@@ -77,6 +77,12 @@
       <version>r05</version>
     </dependency>
     -->
+    <dependency>
+      <groupId>org.scalatest</groupId>
+      <artifactId>scalatest_${scala_tag}</artifactId>
+      <version>3.0.5</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <repositories>

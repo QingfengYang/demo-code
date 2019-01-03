@@ -4,7 +4,7 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.sql.SparkSession
 
 
-class JsonFilePathGenerator(val pathPattern: String, val date: String, val spark: SparkSession) {
+class JsonFilePathGenerator(val pathPattern: String, val dateSeq: Seq[String], val spark: SparkSession) {
 
   /*
       app_path_pattern = /data/applist/app_key_p={APP_KEY}/type_p={FILE_TYPE}/{FILE_TYPE}_{DATE}.txt
@@ -21,10 +21,12 @@ class JsonFilePathGenerator(val pathPattern: String, val date: String, val spark
     targetPathSeq
   }
 
-  private[this] def getAppJsonFilePaths(appFileTypes: Seq[String]): Seq[String] = {
-    val inputPathSeq: Seq[String] = JsonFilePathGenerator.APP_KEYS_SEQ.flatMap{appkey: String =>
-      appFileTypes.map(ftype => pathPattern.replaceAll("\\{APP_KEY}", appkey)
-        .replaceAll("\\{FILE_TYPE}", ftype).replaceAll("\\{DATE}", date))
+  def getAppJsonFilePaths(appFileTypes: Seq[String]): Seq[String] = {
+    val inputPathSeq: Seq[String] = dateSeq.flatMap{ date =>
+      JsonFilePathGenerator.APP_KEYS_SEQ.flatMap{appkey: String =>
+        appFileTypes.map(ftype => pathPattern.replaceAll("\\{APP_KEY}", appkey)
+          .replaceAll("\\{FILE_TYPE}", ftype).replaceAll("\\{DATE}", date))
+      }
     }
     val targetPathSeq: Seq[String] = filterHadoopPathExists(inputPathSeq, spark)
     targetPathSeq
@@ -51,3 +53,13 @@ object JsonFilePathGenerator{
   val INSTALL_APP_TYPES = Seq("f1", "f2", "f3")
   val OPEN_APP_TYPES = Seq("f4")
 }
+
+/*
+object Test {
+  def main(args: Array[String]): Unit = {
+    val pathPattern = "/Users/yangqingfeng/tmp/debug/applist/date_p={DATE}/app_key_p={APP_KEY}/type_p={FILE_TYPE}"
+    val dateSeq = Seq("20181211", "20181212", "20181213")
+    val generator = new JsonFilePathGenerator(pathPattern, dateSeq, null)
+    println(generator.getAppJsonFilePaths(JsonFilePathGenerator.INSTALL_APP_TYPES).mkString("\n"))
+  }
+}*/
