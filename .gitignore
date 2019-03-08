@@ -14,3 +14,6 @@ python3/.idea/*
 scala/run-local/spark-warehouse/*
 hive/udf-uprofile/target/*
 hive/udf-uprofile/target
+scala/*/.idea/*
+scala/*/target/*
+scala/*/*.log
