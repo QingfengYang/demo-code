@@ -3,6 +3,8 @@
 *.cfg
 python3/venv
 python3/.idea
+python3/.idea/*
+python3/.idea/*.xml
 */__pycache__/*
 python3/rb_sort/__pycache__/ComplexSort.cpython-36.pyc
 *.pyc
@@ -14,6 +16,9 @@ python3/.idea/*
 scala/run-local/spark-warehouse/*
 hive/udf-uprofile/target/*
 hive/udf-uprofile/target
+hive/udf-uprofile/.idea/*
 scala/*/.idea/*
 scala/*/target/*
 scala/*/*.log
+java/kafka-demo/.idea/*
+java/kafka-demo/mtxx-event/target/*

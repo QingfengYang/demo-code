@@ -34,12 +34,13 @@ object WifiRecognizeApp {
       false
     }
 
-    val (spark, wfConnectAct: Dataset[UidConnectWifi]) = if (isDebug) {
+    val (spark, wfConnectActAll: Dataset[UidConnectWifi]) = if (isDebug) {
       val spark = SparkSession.builder().master("local[2]").appName("WIFI Recognize Graph Application").getOrCreate()
       import spark.implicits._
       val wfConnectActTmp: Dataset[UidConnectWifi] = spark.sparkContext.textFile(sourceHiveTable).map(line => line.split("\t")).zipWithUniqueId()
         .map{case(parts, vid) =>
-          UidConnectWifi(parts(0).trim.toLong, parts(1), parseStringElement(parts(2)), parts(3), parts(4).trim.toInt, parts(5), vid)
+          UidConnectWifi(parts(0).trim.toLong, parseStringElement(parts(1)), parseStringElement(parts(2)),
+            parseStringElement(parts(3)), parts(4).trim.toInt, parseStringElement(parts(5)), vid)
         }.toDS()
       (spark, wfConnectActTmp)
     } else {
@@ -55,16 +56,18 @@ object WifiRecognizeApp {
       from $sourceHiveTable
       where date_p=$datePartition
       """.stripMargin).rdd.zipWithUniqueId().map{case(row, vid) =>
-        UidConnectWifi(row.getLong(0), row.getString(1), parseStringElement(row.getString(2)), row.getString(3), row.getInt(4), row.getString(5), vid)
+        UidConnectWifi(row.getLong(0), parseStringElement(row.getString(1)), parseStringElement(row.getString(2)),
+          parseStringElement(row.getString(3)), row.getInt(4), parseStringElement(row.getString(5)), vid)
       }.toDS()
 
       (sparkSession, wfConnectActTmp)
     }
 
-    import spark.implicits._
 
+    import spark.implicits._
+    wfConnectActAll.persist(StorageLevel.MEMORY_AND_DISK)
+    val wfConnectAct = wfConnectActAll.filter("bssid is null")
     wfConnectAct.createOrReplaceTempView(WIFI_CONNECT_ACTION)
-    wfConnectAct.persist(StorageLevel.MEMORY_AND_DISK)
 
     val uniqeWifi: Dataset[WifiNode] = spark.sql(
       s"""
@@ -93,7 +96,6 @@ object WifiRecognizeApp {
         group by uid, wifiName
       """.stripMargin
     )
-    //uidConnitwifiNode.flatMap(row => row.getSeq[Long](2)).show(10)
     val relationships: Dataset[Edge[String]] = uidConnitwifiNode.filter(row => row.getSeq(2).length > 1).flatMap{row =>
       val vertexIdSeq: Seq[Long] = row.getSeq[Long](2)
       val relation_buffer: ArrayBuffer[Edge[String]] = new ArrayBuffer[Edge[String]]()
@@ -114,14 +116,21 @@ object WifiRecognizeApp {
 
     val clustedWifiAct: DataFrame = spark.sql(
       s"""
-        select uid, a.wifiName, a.geohashOp, a.ip, bssid, a.dayNum, nvl(w.vertexId, a.vid) as clusterid, $datePartition as date_p
+        select uid, a.wifiName, a.geohashOp, a.ip, bssid, a.dayNum, nvl(w.vertexId, a.vid) as wifi_id, $datePartition as date_p
         from $WIFI_CONNECT_ACTION a left join clustered_wifi w on a.wifiName=w.wifiName and a.ip=w.ip
-        order by vertexId, uid, wifiName, ip
       """.stripMargin)
+
+    import org.apache.spark.sql.functions.{col, lit, when}
+    val outputWifiAct: DataFrame = wfConnectActAll.filter("bssid is not null")
+      //.withColumn("wifi_id", col("bssid"))
+      .withColumn("date_p", lit(datePartition))
+      .select($"uid", $"wifiName", $"geohashOp".alias("geohash"), $"ip", $"bssid", $"dayNum", $"bssid".alias("wifi_id"), $"date_p") union clustedWifiAct
+    /* union
+      clustedWifiAct.select($"uid", $"wifiName", $"geohashOp".alias("geohash"), $"ip", $"bssid", $"dayNum", $"wifi_id", $"date_p")*/
     if (isDebug) {
-      clustedWifiAct.show(20, false)
+      outputWifiAct.show(20, false)
     } else {
-      clustedWifiAct.write.mode(SaveMode.Overwrite).insertInto(targetHiveTable)
+      outputWifiAct.write.mode(SaveMode.Overwrite).insertInto(targetHiveTable)
     }
   }
 
