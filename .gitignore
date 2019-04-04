@@ -22,3 +22,4 @@ scala/*/target/*
 scala/*/*.log
 java/kafka-demo/.idea/*
 java/kafka-demo/mtxx-event/target/*
+jupyter/lab/.ipynb_checkpoints/*
